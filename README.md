@@ -6,7 +6,7 @@
 
 Predict the quality of a derpibooru image using it's tags, datetime and score.
 
-The values produced by this network are a representation of score that is not affected by the content of the image and time that the image was uploaded.
+The values produced by this network are a representation of image quality that is not affected by the content of the image and time that the image was uploaded.
 
 ---
 
