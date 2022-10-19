@@ -108,3 +108,7 @@ def to_device(x, device):
         return {k: to_device(v, device) for k, v in x.items()}
     else:
         return x
+
+import collections
+def get_duplicates(lst):
+    return [item for item, count in collections.Counter(lst).items() if count > 1]

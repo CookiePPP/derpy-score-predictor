@@ -47,15 +47,20 @@ class Preprocess(data.Dataset):
         datetime_obj = datetime.datetime.strptime(datetime_str, "%Y-%m-%dT%H:%M:%SZ")
         # get year, week, day, hour
         year = datetime_obj.year - 2010 # 0 = 2010, 1 = 2011, ...
-        week = datetime_obj.isocalendar()[1] # 1-53
+        week = datetime_obj.isocalendar()[1] - 1 # 0 = week 1, 1 = week 2, ...
         day = datetime_obj.weekday() # 0 = Monday, 6 = Sunday
         hour = datetime_obj.hour # 0-23
+        
+        # get weeks since 2010
+        abwk = int((datetime_obj.year - 2010) * 52.1429) + datetime_obj.isocalendar()[1] - 1
         
         # convert to tensors
         year = torch.tensor(year, dtype=torch.long).view(1, 1) # [B, 1]
         week = torch.tensor(week, dtype=torch.long).view(1, 1) # [B, 1]
         day  = torch.tensor( day, dtype=torch.long).view(1, 1) # [B, 1]
         hour = torch.tensor(hour, dtype=torch.long).view(1, 1) # [B, 1]
+        abwk = torch.tensor(abwk, dtype=torch.long).view(1, 1) # [B, 1]
+        
         
         # return
         return {
@@ -64,6 +69,7 @@ class Preprocess(data.Dataset):
             "week" : week,
             "day"  : day,
             "hour" : hour,
+            "abwk" : abwk,
         }
 
 # create dataset class
@@ -79,6 +85,7 @@ class Dataset(data.Dataset):
         d = self.metadata[index]
         # get input tensors
         tag_str = ", ".join(d['rating']+d['characters']+d['ocs']+d['tags']) # does not include artist, art pack, series, etc.
+        tag_str = tag_str.lower()
         datetime_str = d['created_at']
         tensors_dict = self.preprocess(tag_str, datetime_str)
         
@@ -116,6 +123,8 @@ def collate_func(batch):
     week = torch.cat([d['input']['week'] for d in batch], dim=0) #  LongTensor[B,      1]
     day  = torch.cat([d['input']['day' ] for d in batch], dim=0) #  LongTensor[B,      1]
     hour = torch.cat([d['input']['hour'] for d in batch], dim=0) #  LongTensor[B,      1]
+    abwk = torch.cat([d['input']['abwk'] for d in batch], dim=0) #  LongTensor[B,      1]
+    
     # get target tensors
     wilson_score = torch.cat([d['target']['wilson_score'] for d in batch], dim=0) # FloatTensor[B, 1]
     score        = torch.cat([d['target']['score'       ] for d in batch], dim=0) # FloatTensor[B, 1]
@@ -130,6 +139,7 @@ def collate_func(batch):
             "week": week,
             "day" : day,
             "hour": hour,
+            "abwk": abwk,
         },
         "target": {
             "wilson_score": wilson_score,

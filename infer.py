@@ -2,26 +2,27 @@ from model import Model
 from data import Preprocess
 
 if __name__ == '__main__':
-    checkpoint_path = "runs/2nb_2nl_512hs_0.1do_512bs_1000tags_3patience/model.pt"
+    checkpoint_path = "runs/2nb_2nl_256hs_0.1do_512bs_1000tags_2patience_2wf/best_val_model.pt"
     
     # get model + data processor
     model = Model.load_from_checkpoint(checkpoint_path)
     preprocess = Preprocess(model)
     
     # example input
-    tag_str = "explicit, artist:deviousember, artist:shinodage, princess cadance, princess celestia, shining armor, twilight sparkle, alicorn, pony, unicorn, against wall, ahegao, animated, balls, blushing, brother and sister, clopfic in the comments, cute, eyelashes, faceless male, female, gif, incest, infidelity, leg lock, love, male, mare, nudity, offscreen character, penetration, sex, sexy armor, shiningsparkle, shipping, stallion, stallion on mare, stealth sex, straight, stupid sexy twilight, suspended congress, taint, thrill of almost being caught, tongue out, twiabetes, twilight sparkle (alicorn), underhoof, vaginal"
+    tag_str = "explicit, applejack, grass"
     datetime = "2015-10-16T15:51:38Z"
     scores = {
-        "wilson_score": 0.9732285234219141,
-        "score": 4009,
-        "upvotes": 4094,
-        "downvotes": 85,
+        "wilson_score": 0,
+        "score": 185,
+        "upvotes": 0,
+        "downvotes": 0,
     }
     
     # calculate percentile
     input = preprocess(tag_str, datetime)
-    output = model.infer_percentile(input, scores)
-    print(output)
+    output = model.infer_percentile(input, scores)[0]
+    print(tag_str)
+    print(f"{output['score']:.1%} Score")
     
     # for a 'safe humanized starlight glimmer' image,
     # getting 185 score would put you in the top 63% by score.

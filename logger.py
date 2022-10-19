@@ -1,6 +1,7 @@
 import math
 import os
 
+import torch
 from torch.utils.tensorboard import SummaryWriter
 
 class Logger:
@@ -25,12 +26,14 @@ class Logger:
     
     def log(self, model, optimizer, loss_dict, dataset_name):
         # extract vars from objects
-        step = model.iteration
-        epoch = model.epoch
-        lr = optimizer.param_groups[0]["lr"]
+        step = model.iteration.item()
+        epoch = model.epoch.item()
         
         # log the loss_dict to tensorboard
         for k, v in loss_dict.items():
+            if torch.is_tensor(v):
+                v = v.item()
+            
             # calc exponential moving average of loss
             if math.isfinite(v):
                 if k not in self.expavg_loss_dict:
@@ -44,4 +47,6 @@ class Logger:
         # log epoch and lr
         if dataset_name == "train":
             self.writer.add_scalar("misc/epoch", epoch, step)
+            
+            lr = optimizer.param_groups[0]["lr"]
             self.writer.add_scalar("misc/lr"   , lr   , step)

@@ -32,29 +32,33 @@ class ResNetBlock(nn.Module):
     """
     ResNetBlock takes FloatTensor[B, D] and returns FloatTensor[B, D].
     """
-    def __init__(self, hidden_size, n_layers, dropout, batch_norm, act_func, rezero: bool = False):
+    def __init__(self, hidden_size, n_layers, dropout, batch_norm, act_func, rezero: bool = False, widen_factor: int = 1):
         super(ResNetBlock, self).__init__()
         self.rezero = rezero
         self.act_func = act_func
+        self.widen_factor = widen_factor # Widen the internal layers by this factor.
+        
+        self.dropout = nn.Dropout(dropout)
         
         self.lins = nn.ModuleList()
         self.bns = nn.ModuleList() if batch_norm else None
         for i in range(n_layers):
-            self.lins.append(nn.Linear(hidden_size, hidden_size))
+            in_dim  = hidden_size if i ==            0 else hidden_size * self.widen_factor
+            out_dim = hidden_size if i == n_layers - 1 else hidden_size * self.widen_factor
+            self.lins.append(nn.Linear(in_dim, out_dim))
             if batch_norm:
-                self.bns.append(nn.BatchNorm1d(hidden_size))
-        self.dropout = nn.Dropout(dropout)
+                self.bns.append(nn.BatchNorm1d(out_dim))
         if rezero:
             self.rescale = nn.Parameter(torch.ones(1) * 1e-3)
 
     def forward(self, x):
         y = x
         for i, lin in enumerate(self.lins):
+            y = self.dropout(y)
             y = lin(y)
             if self.bns is not None:
                 y = self.bns[i](y)
             y = self.act_func(y)
-            y = self.dropout(y)
         if self.rezero:
             y = y * self.rescale
         return x + y
@@ -94,7 +98,7 @@ class SmoothedBatchNorm(nn.Module):
         return x
 
 class Model(nn.Module):
-    def __init__(self, tags: list[str], n_blocks: int, n_layers: int, hidden_size: int, dropout: float, batch_norm: bool, act_func: nn.ReLU(), rezero: bool = False):
+    def __init__(self, tags: list[str], n_blocks: int, n_layers: int, hidden_size: int, dropout: float, batch_norm: bool, act_func: nn.ReLU(), rezero: bool = False, widen_factor=1):
         super().__init__()
         self.tags = tags # list of tags, their position is their index in the embedding
         self.n_blocks = n_blocks
@@ -104,6 +108,7 @@ class Model(nn.Module):
         self.batch_norm = batch_norm
         self.act_func = act_func
         self.rezero = rezero
+        self.widen_factor = widen_factor
         
         # Register buffer for iteration, epoch and val loss
         self.register_buffer('iteration', torch.zeros(1, dtype=torch.long   ))
@@ -111,24 +116,31 @@ class Model(nn.Module):
         self.register_buffer('val_loss' , torch.zeros(1, dtype=torch.float32))
         
         # Loss function targets are normalized while the model trains.
-        self.ws_norm = SmoothedBatchNorm(1, momentum=0.01, affine=False) # wilson_score
-        self.sc_norm = SmoothedBatchNorm(1, momentum=0.01, affine=False) # score
-        self.up_norm = SmoothedBatchNorm(1, momentum=0.01, affine=False) # upvotes
-        self.dn_norm = SmoothedBatchNorm(1, momentum=0.01, affine=False) # downvotes
+        self.ws_norm = SmoothedBatchNorm(1, momentum=0.1, affine=False) # wilson_score
+        self.sc_norm = SmoothedBatchNorm(1, momentum=0.1, affine=False) # score
+        self.up_norm = SmoothedBatchNorm(1, momentum=0.1, affine=False) # upvotes
+        self.dn_norm = SmoothedBatchNorm(1, momentum=0.1, affine=False) # downvotes
         
         # Tags will use linear prenet
         self.pre = nn.Linear(len(self.tags), hidden_size)
         
         # Time will use embedding
-        self.year_emb = nn.Embedding(16, hidden_size)
-        self.week_emb = nn.Embedding(64, hidden_size)
-        self. day_emb = nn.Embedding( 7, hidden_size)
-        self.hour_emb = nn.Embedding(24, hidden_size)
+        self.year_emb = nn.Embedding(   16, hidden_size)
+        self.week_emb = nn.Embedding(   64, hidden_size) # week of the year
+        self.abwk_emb = nn.Embedding(16*64, hidden_size) # week since the beginning of the dataset
+        self. day_emb = nn.Embedding(    7, hidden_size)
+        self.hour_emb = nn.Embedding(   24, hidden_size)
+        # init embeddings with smaller values
+        nn.init.normal_(self.year_emb.weight, mean=0, std=1e-3)
+        nn.init.normal_(self.week_emb.weight, mean=0, std=1e-3)
+        nn.init.normal_(self.abwk_emb.weight, mean=0, std=1e-3)
+        nn.init.normal_(self. day_emb.weight, mean=0, std=1e-3)
+        nn.init.normal_(self.hour_emb.weight, mean=0, std=1e-3)
         
         # ResNetBlocks
         self.resnet = nn.ModuleList()
-        for i in range(n_layers):
-            self.resnet.append(ResNetBlock(hidden_size, n_layers, dropout, batch_norm, act_func, rezero=rezero))
+        for i in range(n_blocks):
+            self.resnet.append(ResNetBlock(hidden_size, n_layers, dropout, batch_norm, act_func, rezero=rezero, widen_factor=widen_factor))
         
         # Output
         self.pos = nn.Linear(hidden_size, 8)
@@ -147,10 +159,12 @@ class Model(nn.Module):
         B, hidden_size = x.shape
         
         # Time Embeddings
-        x += self.year_emb(input["year"]).view(B, hidden_size)
-        x += self.week_emb(input["week"]).view(B, hidden_size)
-        x += self. day_emb(input[ "day"]).view(B, hidden_size)
-        x += self.hour_emb(input["hour"]).view(B, hidden_size)
+        emb  = self.year_emb(input["year"]).view(B, hidden_size)
+        emb += self.week_emb(input["week"]).view(B, hidden_size)
+        emb += self.abwk_emb(input["abwk"]).view(B, hidden_size)
+        emb += self. day_emb(input[ "day"]).view(B, hidden_size)
+        emb += self.hour_emb(input["hour"]).view(B, hidden_size)
+        x += emb
         
         # ResNetBlocks
         for i in range(self.n_blocks):
@@ -165,13 +179,13 @@ class Model(nn.Module):
         
         # Return the parameters of the Gaussian distributions
         return {
-            "wilson_score_mu"   : mu[:, 0:1],
+            "wilson_score_mu"   :    mu[:, 0:1],
             "wilson_score_sigma": sigma[:, 0:1],
-            "score_mu"          : mu[:, 1:2],
+            "score_mu"          :    mu[:, 1:2],
             "score_sigma"       : sigma[:, 1:2],
-            "upvotes_mu"        : mu[:, 2:3],
+            "upvotes_mu"        :    mu[:, 2:3],
             "upvotes_sigma"     : sigma[:, 2:3],
-            "downvotes_mu"      : mu[:, 3:4],
+            "downvotes_mu"      :    mu[:, 3:4],
             "downvotes_sigma"   : sigma[:, 3:4],
         }
     
@@ -224,7 +238,7 @@ class Model(nn.Module):
         """Take input dict and return parameters for all normalized distributions."""
         return self(input)
     
-    def infer_percentile(self, input: dict, scores: dict):
+    def infer_percentile(self, input: dict, scores: dict, mc_dropout_sampling: int = 10):
         """
         Input tags+datetime and scores and the model will return the predicted percentile of the score.
         
@@ -232,39 +246,55 @@ class Model(nn.Module):
             input: dict
             scores: dict
                 {'wilson_score': float, 'score': int, 'upvotes': int, 'downvotes': int}
-        
+            mc_dropout_sampling: int
+                Number of Monte Carlo Dropout samples to take.
         Return:
             scores_percentiles: dict
                 {'wilson_score': float, 'score': float, 'upvotes': float, 'downvotes': float}
         """
         train = self.training
-        self.eval()
+        
+        input = to_device(input, self.get_device())
         
         # Get the distribution parameters
-        output = self(input)
+        self.train(mc_dropout_sampling != 1)
+        outputs = []
+        with torch.random.fork_rng():
+            for i in range(mc_dropout_sampling):
+                torch.random.manual_seed(i)
+                output = self(input)
+                outputs.append(output)
+        
+        # average outputs
+        output = {}
+        for key in outputs[0]:
+            output[key] = torch.stack([o[key] for o in outputs]).mean(0)
         
         # Convert img_data to tensor
         dtype = self.get_dtype()
-        wilson_score = torch.tensor(scores["wilson_score"], dtype=dtype).view(-1, 1) # [B]
-        score        = torch.tensor(scores["score"       ], dtype=dtype).view(-1, 1) # [B]
-        upvotes      = torch.tensor(scores["upvotes"     ], dtype=dtype).view(-1, 1) # [B]
-        downvotes    = torch.tensor(scores["downvotes"   ], dtype=dtype).view(-1, 1) # [B]
+        device = self.get_device()
+        wilson_score = torch.tensor(scores["wilson_score"], dtype=dtype, device=device).view(-1, 1) # [B, 1]
+        score        = torch.tensor(scores["score"       ], dtype=dtype, device=device).view(-1, 1) # [B, 1]
+        upvotes      = torch.tensor(scores["upvotes"     ], dtype=dtype, device=device).view(-1, 1) # [B, 1]
+        downvotes    = torch.tensor(scores["downvotes"   ], dtype=dtype, device=device).view(-1, 1) # [B, 1]
+        B = wilson_score.shape[0]
         
         # Normalize the scores
-        wilson_score = self.ws_norm(wilson_score)
-        score        = self.sc_norm(score)
-        upvotes      = self.up_norm(upvotes)
-        downvotes    = self.dn_norm(downvotes)
+        self.eval()
+        wilson_score = self.ws_norm(wilson_score) # [B, 1]
+        score        = self.sc_norm(score       ) # [B, 1]
+        upvotes      = self.up_norm(upvotes     ) # [B, 1]
+        downvotes    = self.dn_norm(downvotes   ) # [B, 1]
         
         # Compute the percentiles using pytorch Normal distribution
         scores_percentiles = {}
-        scores_percentiles["wilson_score"] = Normal(output["wilson_score_mu"], output["wilson_score_sigma"]).cdf(wilson_score)
-        scores_percentiles["score"       ] = Normal(output["score_mu"       ], output["score_sigma"       ]).cdf(score       )
-        scores_percentiles["upvotes"     ] = Normal(output["upvotes_mu"     ], output["upvotes_sigma"     ]).cdf(upvotes     )
-        scores_percentiles["downvotes"   ] = Normal(output["downvotes_mu"   ], output["downvotes_sigma"   ]).cdf(downvotes   )
+        scores_percentiles["wilson_score"] = Normal(output["wilson_score_mu"], output["wilson_score_sigma"]).cdf(wilson_score).view(-1).tolist()
+        scores_percentiles["score"       ] = Normal(output["score_mu"       ], output["score_sigma"       ]).cdf(score       ).view(-1).tolist()
+        scores_percentiles["upvotes"     ] = Normal(output["upvotes_mu"     ], output["upvotes_sigma"     ]).cdf(upvotes     ).view(-1).tolist()
+        scores_percentiles["downvotes"   ] = Normal(output["downvotes_mu"   ], output["downvotes_sigma"   ]).cdf(downvotes   ).view(-1).tolist()
         
         # Convert to float
-        scores_percentiles = {key: val.item() for key, val in scores_percentiles.items()}
+        scores_percentiles = [{key: val[i] for key, val in scores_percentiles.items()} for i in range(B)]
         
         # Return the percentiles
         self.train(train)
@@ -280,6 +310,7 @@ class Model(nn.Module):
             "batch_norm": self.batch_norm,
             "act_func": self.act_func,
             "rezero": self.rezero,
+            "widen_factor": self.widen_factor,
         }
     
     def save(self, path: str):
